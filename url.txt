@@ -1,0 +1,3 @@
+https://raw.githubusercontent.com/NzflpKfnjos/demo/refs/heads/main/1.sh #新设备伪装sh
+https://raw.githubusercontent.com/NzflpKfnjos/demo/refs/heads/main/2.sh #tomato
+https://raw.githubusercontent.com/NzflpKfnjos/demo/refs/heads/main/3.sh #无畏契约-葫芦娃
