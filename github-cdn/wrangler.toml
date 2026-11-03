@@ -1,0 +1,8 @@
+name = "github-cdn"
+main = "src/worker.js"
+compatibility_date = "2026-11-01"
+workers_dev = true
+
+[vars]
+RAW_CACHE_TTL = "3600"
+RELEASE_CACHE_TTL = "86400"
