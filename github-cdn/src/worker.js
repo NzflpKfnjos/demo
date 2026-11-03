@@ -8,16 +8,11 @@ const REDIRECT_HOSTS = new Set([
 function error(message, status) {
   return new Response(`${message}\n`, {
     status,
-    headers: { 'Cache-Control': 'no-store', 'Content-Type': 'text/plain; charset=utf-8' },
+    headers: { 'Content-Type': 'text/plain; charset=utf-8' },
   });
 }
 
-function ttl(value, fallback) {
-  const number = Number(value);
-  return Number.isInteger(number) && number > 0 ? Math.min(number, 31536000) : fallback;
-}
-
-export function resolveUpstream(url, env = {}) {
+export function resolveUpstream(url) {
   let path = url.pathname;
   // Accept a complete GitHub download URL appended after the Worker origin.
   if (path.startsWith('/https://')) {
@@ -43,14 +38,12 @@ export function resolveUpstream(url, env = {}) {
   if (kind === 'raw') {
     return {
       url: `https://raw.githubusercontent.com/${base}/${encode(ref)}/${file.map(encode).join('/')}`,
-      ttl: ttl(env.RAW_CACHE_TTL, 3600),
     };
   }
   if (kind === 'release' && file.length === 1) {
     const releasePath = ref === 'latest' ? 'latest/download' : `download/${encode(ref)}`;
     return {
       url: `https://github.com/${base}/releases/${releasePath}/${encode(file[0])}`,
-      ttl: ttl(env.RELEASE_CACHE_TTL, 86400),
     };
   }
   return null;
@@ -78,7 +71,7 @@ async function fetchUpstream(url, request) {
 }
 
 export default {
-  async fetch(request, env, ctx) {
+  async fetch(request) {
     if (!['GET', 'HEAD'].includes(request.method)) {
       const response = error('Only GET and HEAD are supported', 405);
       response.headers.set('Allow', 'GET, HEAD');
@@ -87,29 +80,11 @@ export default {
     const url = new URL(request.url);
     if (url.pathname === '/') {
       return new Response(request.method === 'HEAD' ? null : 'GitHub CDN — append the original URL:\n/https://raw.githubusercontent.com/OWNER/REPO/REF/FILE\n/https://github.com/OWNER/REPO/releases/download/TAG/ASSET\n/https://github.com/OWNER/REPO/releases/latest/download/ASSET\n', {
-        headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' },
+        headers: { 'Content-Type': 'text/plain; charset=utf-8' },
       });
     }
-    const target = resolveUpstream(url, env);
+    const target = resolveUpstream(url);
     if (!target) return error('Append an HTTPS raw.githubusercontent.com file URL or a github.com Release download URL after the Worker domain', 400);
-
-    // Query parameters are not forwarded and do not create duplicate cache entries.
-    url.search = '';
-    const key = new Request(url.href, { method: 'GET' });
-    const ranged = request.headers.has('Range');
-    const cache = caches.default;
-    if (!ranged) {
-      try {
-        const cached = await cache.match(key);
-        if (cached) {
-          const response = new Response(request.method === 'HEAD' ? null : cached.body, cached);
-          response.headers.set('X-Cache', 'HIT');
-          return response;
-        }
-      } catch {
-        // Cache availability must not prevent downloads.
-      }
-    }
 
     let upstream;
     try {
@@ -120,14 +95,12 @@ export default {
     const response = new Response(request.method === 'HEAD' ? null : upstream.body, upstream);
     response.headers.delete('Set-Cookie');
     response.headers.set('X-Content-Type-Options', 'nosniff');
-    response.headers.set('X-Cache', ranged || request.method === 'HEAD' ? 'BYPASS' : 'MISS');
-    if (upstream.status === 200 && !ranged) {
-      response.headers.set('Cache-Control', `public, max-age=${Math.min(target.ttl, 300)}, s-maxage=${target.ttl}`);
-      if (request.method === 'GET') {
-        ctx.waitUntil(cache.put(key, response.clone()).catch(() => {}));
-      }
-    } else {
-      response.headers.set('Cache-Control', 'no-store');
+    // Let the downstream CDN choose its own caching policy.
+    for (const name of [
+      'Cache-Control', 'CDN-Cache-Control', 'Cloudflare-CDN-Cache-Control',
+      'Surrogate-Control', 'Expires', 'Age', 'X-Cache', 'CF-Cache-Status',
+    ]) {
+      response.headers.delete(name);
     }
     return response;
   },

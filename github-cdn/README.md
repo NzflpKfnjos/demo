@@ -1,6 +1,6 @@
 # GitHub CDN Worker
 
-使用 Cloudflare Workers 代理 GitHub 公开 Raw 文件和 Release 附件，并用 Cache API 缓存响应。此目录对应仓库 `NzflpKfnjos/demo`；部署后，将文件链接替换为下列加速地址即可，无需修改 GitHub 仓库设置。
+使用 Cloudflare Workers 代理 GitHub 公开 Raw 文件和 Release 附件，作为后续 CDN 的代理源站。此目录对应仓库 `NzflpKfnjos/demo`；部署后，将文件链接替换为下列加速地址即可，无需修改 GitHub 仓库设置。
 
 ## 部署
 
@@ -11,7 +11,7 @@ npx wrangler login
 npm run deploy
 ```
 
-部署成功后会输出 Worker 地址，例如 `https://github-cdn.<你的子域>.workers.dev`。也可以在 Cloudflare 的 Workers & Pages 中创建名为 `github-cdn` 的 Worker，把 `src/worker.js` 的全部内容粘贴到编辑器并部署；不设置环境变量时使用默认缓存时间。
+部署成功后会输出 Worker 地址，例如 `https://github-cdn.<你的子域>.workers.dev`。也可以在 Cloudflare 的 Workers & Pages 中创建名为 `github-cdn` 的 Worker，把 `src/worker.js` 的全部内容粘贴到编辑器并部署。
 
 本地开发运行 `npm run dev`，测试运行 `npm test`。生产环境可在 Cloudflare 控制台给 Worker 绑定自定义域名。
 
@@ -34,20 +34,15 @@ curl -I 'https://github-cdn.1878966904.workers.dev/https://raw.githubusercontent
 curl -L 'https://github-cdn.1878966904.workers.dev/https://github.com/NzflpKfnjos/demo/releases/download/v1.0.0/app.zip' -o app.zip
 ```
 
-## 缓存规则
+## CDN 缓存
 
-在 `wrangler.toml` 的 `[vars]` 中配置，或在控制台设置同名变量，修改后重新部署：
+Worker 仅流式代理，不使用 Cache API，不设置缓存 TTL，也不输出 `X-Cache`。原有 `RAW_CACHE_TTL`、`RELEASE_CACHE_TTL` 变量已移除。
 
-| 变量 | 默认值 | 含义 |
-| --- | --- | --- |
-| `RAW_CACHE_TTL` | `3600` | Raw 文件边缘缓存秒数 |
-| `RELEASE_CACHE_TTL` | `86400` | Release 附件边缘缓存秒数，包含 `latest` |
+代理响应会移除上游的 `Cache-Control`、`CDN-Cache-Control`、`Cloudflare-CDN-Cache-Control`、`Surrogate-Control`、`Expires`、`Age` 和缓存状态头，缓存策略交由后续 CDN 配置。保留 `ETag`、`Last-Modified`、`Content-Type`、`Content-Length` 等文件元数据，以及 Range 请求和部分响应支持。Worker 自身生成的首页和错误响应同样不设置缓存控制头。
 
-仅缓存完整 GET 请求的 `200` 响应。`Cache-Control` 的 `s-maxage` 为上述边缘缓存时间，浏览器 `max-age` 最多 300 秒。`X-Cache` 表示 `HIT`、`MISS` 或 `BYPASS`。HEAD 可读取已有缓存；Range 请求透传上游以支持断点续传，不缓存部分响应；错误响应设置 `no-store`。
+接入 CDN 时，把 Worker 域名设为源站，按需要配置文件缓存时间、查询参数缓存键和错误响应缓存策略。GitHub 原链接中间的 `https://` 必须原样保留，避免 CDN 将路径中的连续斜杠合并。查询参数不会转发给 GitHub。
 
-同一分支、tag 或 `latest` 更新后，旧内容可能保留到缓存到期。需要稳定内容时使用 commit SHA 或固定且不覆盖的 Release 版本；`latest` 更新频繁时建议缩短 Release TTL。查询参数会被忽略，不能用 `?v=...` 刷新缓存。
-
-Cache API 缓存按 Cloudflare 数据中心独立存储，不保证每次命中，也不提供 Tiered Cache。超出 Cloudflare 套餐缓存大小限制的文件仍会尝试流式代理，但不会成功写入缓存；实际可下载大小与吞吐还受 Workers 平台限制。缓存写入失败不影响正常代理。
+分支、tag 或 `latest` 更新后的刷新与过期策略由 CDN 管理；固定内容建议使用 commit SHA 或不覆盖的 Release 版本。
 
 ## 上游限制
 

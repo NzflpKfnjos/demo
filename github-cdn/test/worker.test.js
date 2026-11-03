@@ -3,27 +3,15 @@ import assert from 'node:assert/strict';
 import worker, { resolveUpstream } from '../src/worker.js';
 
 const originalFetch = globalThis.fetch;
-const originalCaches = globalThis.caches;
 afterEach(() => {
   globalThis.fetch = originalFetch;
-  globalThis.caches = originalCaches;
 });
 
 function harness() {
-  const entries = new Map();
-  const pending = [];
-  globalThis.caches = { default: {
-    async match(key) { return entries.get(key.url)?.clone(); },
-    async put(key, response) { entries.set(key.url, response); },
-  } };
   return {
     run(path, options) {
-      return worker.fetch(new Request(`https://cdn.example${path}`, options), {}, {
-        waitUntil(promise) { pending.push(promise); },
-      });
+      return worker.fetch(new Request(`https://cdn.example${path}`, options));
     },
-    flush: () => Promise.all(pending),
-    entries,
   };
 }
 
@@ -57,22 +45,28 @@ test('accepts original direct links and rejects other URL forms', () => {
   }
 });
 
-test('caches successful GETs, ignores queries and serves HEAD without a body', async () => {
+test('proxies every request without cache policy and preserves file metadata', async () => {
   const h = harness();
   let calls = 0;
-  globalThis.fetch = async () => { calls++; return new Response('file', { headers: { 'Set-Cookie': 'secret=1' } }); };
-  const first = await h.run('/https://raw.githubusercontent.com/a/b/main/file?one=1');
-  assert.equal(first.headers.get('X-Cache'), 'MISS');
-  assert.equal(first.headers.get('Cache-Control'), 'public, max-age=300, s-maxage=3600');
-  assert.equal(first.headers.get('Set-Cookie'), null);
-  assert.equal(await first.text(), 'file');
-  await h.flush();
-  const second = await h.run('/https://raw.githubusercontent.com/a/b/main/file?two=2');
-  assert.equal(second.headers.get('X-Cache'), 'HIT');
-  assert.equal(await second.text(), 'file');
-  const head = await h.run('/https://raw.githubusercontent.com/a/b/main/file', { method: 'HEAD' });
-  assert.equal(await head.text(), '');
-  assert.equal(calls, 1);
+  const cacheHeaders = ['Cache-Control', 'CDN-Cache-Control', 'Cloudflare-CDN-Cache-Control', 'Surrogate-Control', 'Expires', 'Age', 'X-Cache', 'CF-Cache-Status'];
+  globalThis.fetch = async (url, options) => {
+    calls++;
+    assert.equal(url, 'https://raw.githubusercontent.com/a/b/main/file');
+    const headers = new Headers(cacheHeaders.map(name => [name, 'upstream-value']));
+    headers.set('Set-Cookie', 'secret=1');
+    headers.set('ETag', '"file-version"');
+    headers.set('Last-Modified', 'Tue, 03 Nov 2026 00:00:00 GMT');
+    return new Response(options.method === 'HEAD' ? null : 'file', { headers });
+  };
+  for (const method of ['GET', 'GET', 'HEAD']) {
+    const response = await h.run('/https://raw.githubusercontent.com/a/b/main/file?ignored=1', { method });
+    for (const name of cacheHeaders) assert.equal(response.headers.get(name), null, name);
+    assert.equal(response.headers.get('Set-Cookie'), null);
+    assert.equal(response.headers.get('ETag'), '"file-version"');
+    assert.equal(response.headers.get('Last-Modified'), 'Tue, 03 Nov 2026 00:00:00 GMT');
+    assert.equal(await response.text(), method === 'HEAD' ? '' : 'file');
+  }
+  assert.equal(calls, 3);
 });
 
 test('follows allowed release redirects without forwarding credentials', async () => {
@@ -89,10 +83,9 @@ test('follows allowed release redirects without forwarding credentials', async (
   assert.equal(calls.length, 2);
   assert.equal(calls[1].options.headers.has('Authorization'), false);
   assert.equal(calls[1].options.headers.has('Cookie'), false);
-  await h.flush();
 });
 
-test('blocks external redirects and does not cache errors', async () => {
+test('blocks external redirects and returns errors without cache policy', async () => {
   const h = harness();
   let calls = 0;
   globalThis.fetch = async () => {
@@ -104,11 +97,10 @@ test('blocks external redirects and does not cache errors', async () => {
   globalThis.fetch = async () => new Response('missing', { status: 404 });
   const missing = await h.run('/raw/a/b/main/missing');
   assert.equal(missing.status, 404);
-  assert.equal(missing.headers.get('Cache-Control'), 'no-store');
-  assert.equal(h.entries.size, 0);
+  assert.equal(missing.headers.get('Cache-Control'), null);
 });
 
-test('range requests bypass cache and preserve partial response headers', async () => {
+test('range requests preserve partial response headers', async () => {
   const h = harness();
   globalThis.fetch = async (url, options) => {
     assert.equal(options.headers.get('Range'), 'bytes=0-3');
@@ -116,8 +108,7 @@ test('range requests bypass cache and preserve partial response headers', async 
   };
   const response = await h.run('/release/a/b/v1/app.zip', { headers: { Range: 'bytes=0-3' } });
   assert.equal(response.status, 206);
-  assert.equal(response.headers.get('X-Cache'), 'BYPASS');
+  assert.equal(response.headers.get('X-Cache'), null);
   assert.equal(response.headers.get('Content-Range'), 'bytes 0-3/100');
-  assert.equal(h.entries.size, 0);
   assert.equal((await h.run('/raw/a/b/main/file', { method: 'POST' })).status, 405);
 });
